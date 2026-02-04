@@ -235,6 +235,18 @@ export class DeploymentBuddyPanel {
         });
         break;
 
+      case 'analyzeCliOutput':
+        const analyzeResult = await this._mcpManager.callTool('analyze_cli_output', {
+          output: message.output
+        });
+        
+        this._panel.webview.postMessage({
+          command: 'cliAnalysisResult',
+          data: analyzeResult.data,
+          error: analyzeResult.error
+        });
+        break;
+
       case 'ensurePackageXml':
         this._panel.webview.postMessage({ command: 'retrieveStatus', status: 'creating_package' });
         const packageResult = await this._mcpManager.callTool('ensure_package_xml', {
@@ -764,6 +776,29 @@ export class DeploymentBuddyPanel {
             justify-content: flex-end;
             gap: 10px;
         }
+        
+        /* CLI Output Analyzer */
+        textarea {
+            font-family: 'Courier New', monospace;
+            resize: vertical;
+        }
+        
+        textarea:focus {
+            outline: 1px solid var(--vscode-focusBorder);
+        }
+        
+        #cliAnalysisResult h3, #cliAnalysisResult h4 {
+            margin-top: 0;
+            margin-bottom: 10px;
+        }
+        
+        #cliAnalysisResult h3 {
+            font-size: 1.1em;
+        }
+        
+        #cliAnalysisResult h4 {
+            font-size: 1em;
+        }
     </style>
 </head>
 <body>
@@ -876,6 +911,25 @@ export class DeploymentBuddyPanel {
                     <div class="empty-state">
                         Select items and click "Build Plan" to create a deployment plan
                     </div>
+                </div>
+            </div>
+            
+            <div class="panel">
+                <div class="panel-header">
+                    <span>CLI Output Analyzer</span>
+                    <button class="btn btn-secondary btn-sm" onclick="clearCliOutput()">Clear</button>
+                </div>
+                <div class="panel-content">
+                    <div style="margin-bottom: 10px;">
+                        <p style="color: var(--vscode-descriptionForeground); font-size: 0.9em; margin-bottom: 10px;">
+                            Paste your Salesforce CLI output here (JSON or text) to analyze errors and get suggestions.
+                        </p>
+                        <textarea id="cliOutputInput" placeholder="Paste CLI output here (e.g., sf project deploy validate --json output)..." style="width: 100%; min-height: 150px; padding: 10px; font-family: monospace; font-size: 0.85em; background: var(--vscode-input-background); color: var(--vscode-input-foreground); border: 1px solid var(--vscode-input-border); border-radius: 4px; resize: vertical;"></textarea>
+                    </div>
+                    <div class="actions">
+                        <button class="btn btn-primary" onclick="analyzeCliOutput()">Analyze Output</button>
+                    </div>
+                    <div id="cliAnalysisResult" style="margin-top: 15px; display: none;"></div>
                 </div>
             </div>
             
@@ -1072,6 +1126,17 @@ export class DeploymentBuddyPanel {
                     }
                     break;
                 
+                case 'cliAnalysisResult':
+                    if (message.data) {
+                        renderCliAnalysis(message.data);
+                    } else if (message.error) {
+                        log('Analysis error: ' + message.error, 'error');
+                        document.getElementById('cliAnalysisResult').style.display = 'block';
+                        document.getElementById('cliAnalysisResult').innerHTML = 
+                            '<div style="color: var(--vscode-errorForeground);">Error analyzing output: ' + message.error + '</div>';
+                    }
+                    break;
+                
                 case 'retrieveStatus':
                     updateRetrieveStatus(message.status);
                     break;
@@ -1210,6 +1275,28 @@ export class DeploymentBuddyPanel {
                 document.execCommand('copy');
                 document.body.removeChild(textarea);
                 log('Command copied to clipboard!', 'success');
+            });
+        }
+        
+        function copyValidationCommand(batchNumber) {
+            const cmdElement = document.getElementById('cmd' + batchNumber);
+            if (!cmdElement) {
+                log('Command not found', 'error');
+                return;
+            }
+            
+            const cmd = cmdElement.textContent || cmdElement.innerText;
+            navigator.clipboard.writeText(cmd).then(() => {
+                log('Validation command copied to clipboard!', 'success');
+            }).catch(() => {
+                // Fallback for older browsers
+                const textarea = document.createElement('textarea');
+                textarea.value = cmd;
+                document.body.appendChild(textarea);
+                textarea.select();
+                document.execCommand('copy');
+                document.body.removeChild(textarea);
+                log('Validation command copied to clipboard!', 'success');
             });
         }
         
@@ -1866,6 +1953,43 @@ export class DeploymentBuddyPanel {
                         }
                     }
                 }
+            }
+            
+            // Show package.xml files and commands for all batches (always show, regardless of success/failure)
+            if (result.results && result.results.length > 0) {
+                let commandsHtml = '<div style="margin-top: 20px; padding: 15px; background: var(--vscode-editor-inactiveSelectionBackground); border-radius: 6px;">';
+                commandsHtml += '<h3 style="margin-top: 0; margin-bottom: 15px;">📦 Package.xml Files & Validation Commands</h3>';
+                
+                
+                for (const batchResult of result.results) {
+                    if (batchResult.packageXmlPath && batchResult.validateCommand) {
+                        const statusColor = batchResult.success ? 'var(--vscode-charts-green)' : (batchResult.errors && batchResult.errors.length > 0 ? 'var(--vscode-errorForeground)' : 'var(--vscode-charts-yellow)');
+                        const statusIcon = batchResult.success ? '✓' : (batchResult.errors && batchResult.errors.length > 0 ? '✗' : '⏳');
+                        
+                        commandsHtml += '<div style="margin-bottom: 20px; padding: 12px; background: var(--vscode-editor-background); border: 1px solid var(--vscode-panel-border); border-radius: 4px;">';
+                        commandsHtml += '<div style="font-weight: 600; margin-bottom: 8px;">';
+                        commandsHtml += '<span style="color: ' + statusColor + '; margin-right: 8px; font-size: 1.1em;">' + statusIcon + '</span>';
+                        commandsHtml += 'Batch ' + batchResult.batchNumber + ': ' + batchResult.metadataType + ' (' + batchResult.componentsValidated + ' components)';
+                        commandsHtml += '</div>';
+                        commandsHtml += '<div style="margin-bottom: 8px; font-size: 0.9em; color: var(--vscode-descriptionForeground);">';
+                        commandsHtml += '<strong>Package.xml:</strong> <code style="background: var(--vscode-textCodeBlock-background); padding: 2px 6px; border-radius: 3px;">' + batchResult.packageXmlPath + '</code>';
+                        commandsHtml += '</div>';
+                        commandsHtml += '<div style="margin-bottom: 8px;">';
+                        commandsHtml += '<strong>Validation Command:</strong>';
+                        commandsHtml += '<div style="margin-top: 5px; padding: 10px 50px 10px 10px; background: var(--vscode-terminal-background); border-radius: 4px; font-family: monospace; font-size: 0.9em; word-break: break-all; position: relative;">';
+                        commandsHtml += '<span id="cmd' + batchResult.batchNumber + '">' + batchResult.validateCommand + '</span>';
+                        commandsHtml += '<button class="btn btn-secondary btn-sm" onclick="copyValidationCommand(' + batchResult.batchNumber + ')" style="position: absolute; right: 10px; top: 50%; transform: translateY(-50%);">Copy</button>';
+                        commandsHtml += '</div>';
+                        commandsHtml += '</div>';
+                        commandsHtml += '</div>';
+                    }
+                }
+                
+                commandsHtml += '</div>';
+                
+                // Append to container
+                const existingHtml = container.innerHTML;
+                container.innerHTML = existingHtml + commandsHtml;
                 
                 // Show suggestion for missing metadata
                 if (result.missingMetadataFoundLocally && result.missingMetadataFoundLocally.length > 0) {
@@ -1894,6 +2018,16 @@ export class DeploymentBuddyPanel {
                     log('', 'info');
                     log('Suggestion: ' + result.suggestion, 'info');
                 }
+                
+                // Handle timeout case
+                if (result.timedOut) {
+                    log('', 'warning');
+                    log('⏱️ Validation timed out due to MCP 60-second limit.', 'warning');
+                    log('Completed ' + result.completedBatches + ' batches before timeout.', 'info');
+                    if (result.nextBatchToValidate) {
+                        log('To continue validation, use the validate_batch tool for remaining batches.', 'info');
+                    }
+                }
             }
         }
         
@@ -1907,6 +2041,93 @@ export class DeploymentBuddyPanel {
             }
         }
         
+        function renderCliAnalysis(analysis) {
+            const container = document.getElementById('cliAnalysisResult');
+            container.style.display = 'block';
+            
+            let html = '<div style="padding: 15px; background: var(--vscode-editor-inactiveSelectionBackground); border-radius: 6px;">';
+            
+            // Summary
+            html += '<div style="margin-bottom: 15px;">';
+            html += '<h3 style="margin-bottom: 10px;">Analysis Summary</h3>';
+            html += '<div><strong>Status:</strong> ';
+            if (analysis.success) {
+                html += '<span style="color: var(--vscode-charts-green);">✓ Success</span>';
+            } else {
+                html += '<span style="color: var(--vscode-errorForeground);">✗ Failed</span>';
+            }
+            html += '</div>';
+            
+            if (analysis.commandType) {
+                html += '<div style="margin-top: 5px;"><strong>Command:</strong> ' + analysis.commandType + '</div>';
+            }
+            
+            if (analysis.totalErrors !== undefined) {
+                html += '<div style="margin-top: 5px;"><strong>Total Errors:</strong> ' + analysis.totalErrors + '</div>';
+            }
+            
+            if (analysis.totalWarnings !== undefined) {
+                html += '<div style="margin-top: 5px;"><strong>Warnings:</strong> ' + analysis.totalWarnings + '</div>';
+            }
+            
+            html += '</div>';
+            
+            // Errors
+            if (analysis.errors && analysis.errors.length > 0) {
+                html += '<div style="margin-top: 15px;">';
+                html += '<h4 style="margin-bottom: 10px; color: var(--vscode-errorForeground);">Errors</h4>';
+                for (const error of analysis.errors) {
+                    html += '<div style="padding: 10px; margin-bottom: 8px; background: var(--vscode-inputValidation-errorBackground); border-left: 3px solid var(--vscode-errorForeground); border-radius: 4px;">';
+                    html += '<div style="font-weight: 600; margin-bottom: 5px;">' + (error.component || 'Unknown') + '</div>';
+                    html += '<div style="font-size: 0.9em;">' + error.message + '</div>';
+                    if (error.lineNumber) {
+                        html += '<div style="font-size: 0.85em; color: var(--vscode-descriptionForeground); margin-top: 5px;">Line: ' + error.lineNumber + '</div>';
+                    }
+                    html += '</div>';
+                }
+                html += '</div>';
+            }
+            
+            // Missing Metadata
+            if (analysis.missingMetadata && analysis.missingMetadata.length > 0) {
+                html += '<div style="margin-top: 15px;">';
+                html += '<h4 style="margin-bottom: 10px;">Missing Metadata</h4>';
+                html += '<div style="padding: 10px; background: var(--vscode-inputValidation-warningBackground); border-radius: 4px;">';
+                for (const missing of analysis.missingMetadata) {
+                    html += '<div style="margin-bottom: 5px;">';
+                    html += '<strong>' + missing.type + ':</strong> ' + missing.name;
+                    if (missing.objectName) {
+                        html += ' (on ' + missing.objectName + ')';
+                    }
+                    html += '</div>';
+                }
+                html += '</div>';
+                html += '</div>';
+            }
+            
+            // Suggestions
+            if (analysis.suggestions && analysis.suggestions.length > 0) {
+                html += '<div style="margin-top: 15px;">';
+                html += '<h4 style="margin-bottom: 10px;">Suggestions</h4>';
+                html += '<ul style="margin-left: 20px;">';
+                for (const suggestion of analysis.suggestions) {
+                    html += '<li style="margin-bottom: 5px;">' + suggestion + '</li>';
+                }
+                html += '</ul>';
+                html += '</div>';
+            }
+            
+            html += '</div>';
+            container.innerHTML = html;
+            
+            // Also log to main log
+            if (analysis.success) {
+                log('CLI output analysis: Success', 'success');
+            } else {
+                log('CLI output analysis: Found ' + (analysis.totalErrors || 0) + ' error(s)', 'error');
+            }
+        }
+        
         function log(message, type = 'info') {
             const logOutput = document.getElementById('logOutput');
             const timestamp = new Date().toLocaleTimeString();
@@ -1917,6 +2138,26 @@ export class DeploymentBuddyPanel {
         
         function clearLogs() {
             document.getElementById('logOutput').innerHTML = '<div class="log-line">Logs cleared...</div>';
+        }
+        
+        function clearCliOutput() {
+            document.getElementById('cliOutputInput').value = '';
+            document.getElementById('cliAnalysisResult').style.display = 'none';
+            document.getElementById('cliAnalysisResult').innerHTML = '';
+        }
+        
+        function analyzeCliOutput() {
+            const output = document.getElementById('cliOutputInput').value.trim();
+            if (!output) {
+                log('Please paste CLI output to analyze', 'error');
+                return;
+            }
+            
+            log('Analyzing CLI output...', 'info');
+            vscode.postMessage({
+                command: 'analyzeCliOutput',
+                output: output
+            });
         }
     </script>
 </body>

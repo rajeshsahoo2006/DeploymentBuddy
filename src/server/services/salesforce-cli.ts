@@ -206,9 +206,10 @@ export class SalesforceCli {
   async deployMetadata(manifestPath: string, checkOnly: boolean = false): Promise<SfCommandResult<any>> {
     const orgFlag = this.defaultOrg ? `-o ${this.defaultOrg}` : '';
     // Use validate command for check-only, deploy start for actual deployment
+    // Increased wait time to 120 seconds for large deployments
     const command = checkOnly 
-      ? `sf project deploy validate --manifest "${manifestPath}" ${orgFlag} --json --wait 30`
-      : `sf project deploy start --manifest "${manifestPath}" ${orgFlag} --json --wait 30`;
+      ? `sf project deploy validate --manifest "${manifestPath}" ${orgFlag} --json --wait 120`
+      : `sf project deploy start --manifest "${manifestPath}" ${orgFlag} --json --wait 120`;
     
     const result = await this.execute(command);
 
@@ -381,8 +382,10 @@ export class SalesforceCli {
     errorDetails?: string[];
   }> {
     const orgFlag = this.defaultOrg ? `-o ${this.defaultOrg}` : '';
+    // Use 50 seconds wait to stay within MCP's 60-second timeout limit
+    // Note: MCP SDK has a hard 60-second timeout, so we must complete before then
     const result = await this.execute(
-      `sf project deploy validate --manifest "${manifestPath}" ${orgFlag} --json --wait 30`
+      `sf project deploy validate --manifest "${manifestPath}" ${orgFlag} --json --wait 50`
     );
 
     try {

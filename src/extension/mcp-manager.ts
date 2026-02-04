@@ -138,6 +138,7 @@ export class McpManager {
 
   /**
    * Call an MCP tool
+   * For long-running operations like validate_plan, we use a longer timeout
    */
   async callTool(name: string, args: Record<string, any> = {}): Promise<McpToolResult> {
     if (!this._isConnected || !this.client) {
@@ -151,10 +152,27 @@ export class McpManager {
       this.outputChannel.appendLine(`Calling tool: ${name}`);
       this.outputChannel.appendLine(`Arguments: ${JSON.stringify(args)}`);
 
-      const result = await this.client.callTool({
+      // For long-running operations, add a progress indicator
+      const isLongRunning = name === 'validate_plan' || name === 'deploy_plan';
+      if (isLongRunning) {
+        this.outputChannel.appendLine(`This operation may take several minutes. Please wait...`);
+      }
+
+      // Wrap in Promise.race to handle potential timeouts
+      // Note: MCP SDK may have its own timeout, but this provides a fallback
+      const toolPromise = this.client.callTool({
         name,
         arguments: args
       });
+
+      // Use a longer timeout for long-running operations (5 minutes)
+      const timeoutPromise = new Promise<never>((_, reject) => {
+        setTimeout(() => reject(new Error('Operation timed out after 5 minutes')), 300000);
+      });
+
+      const result = isLongRunning 
+        ? await Promise.race([toolPromise, timeoutPromise])
+        : await toolPromise;
 
       this.outputChannel.appendLine(`Result: ${JSON.stringify(result)}`);
 
