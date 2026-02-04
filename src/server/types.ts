@@ -10,6 +10,7 @@ export interface OrgInfo {
   orgId?: string;
   isDefault?: boolean;
   isScratch?: boolean;
+  apiVersion?: string;  // API version supported by the org
 }
 
 // Metadata types
@@ -127,4 +128,4 @@ export const DEPLOYMENT_LAYER_ORDER: MetadataType[] = [
 ];
 
 // API version for Salesforce
-export const SF_API_VERSION = '66.0';
+export const SF_API_VERSION = '65.0';

@@ -56,7 +56,7 @@ export class SalesforceCli {
   }
 
   /**
-   * Get current org info
+   * Get current org info including API version
    */
   async getOrgInfo(targetOrg?: string): Promise<SfCommandResult<OrgInfo>> {
     const orgFlag = targetOrg || this.defaultOrg ? `-o ${targetOrg || this.defaultOrg}` : '';
@@ -75,7 +75,8 @@ export class SalesforceCli {
             alias: parsed.result.alias || parsed.result.username,
             username: parsed.result.username,
             instanceUrl: parsed.result.instanceUrl,
-            orgId: parsed.result.id
+            orgId: parsed.result.id,
+            apiVersion: parsed.result.apiVersion // Include API version from org
           }
         };
       }
@@ -83,6 +84,18 @@ export class SalesforceCli {
     } catch (e) {
       return { success: false, error: `Failed to parse org info: ${e}` };
     }
+  }
+
+  /**
+   * Get the API version supported by the target org
+   */
+  async getOrgApiVersion(targetOrg?: string): Promise<string> {
+    const orgInfo = await this.getOrgInfo(targetOrg);
+    if (orgInfo.success && orgInfo.data?.apiVersion) {
+      return orgInfo.data.apiVersion;
+    }
+    // Fallback to default if can't get from org
+    return SF_API_VERSION;
   }
 
   /**
@@ -192,17 +205,19 @@ export class SalesforceCli {
    */
   async deployMetadata(manifestPath: string, checkOnly: boolean = false): Promise<SfCommandResult<any>> {
     const orgFlag = this.defaultOrg ? `-o ${this.defaultOrg}` : '';
-    const checkFlag = checkOnly ? '--dry-run' : '';
-    const result = await this.execute(
-      `sf project deploy start --manifest "${manifestPath}" ${orgFlag} ${checkFlag} --json --wait 30`
-    );
+    // Use validate command for check-only, deploy start for actual deployment
+    const command = checkOnly 
+      ? `sf project deploy validate --manifest "${manifestPath}" ${orgFlag} --json --wait 30`
+      : `sf project deploy start --manifest "${manifestPath}" ${orgFlag} --json --wait 30`;
+    
+    const result = await this.execute(command);
 
     try {
       const parsed = JSON.parse(result.stdout);
       return {
         success: parsed.status === 0,
         data: parsed.result,
-        error: parsed.status !== 0 ? (parsed.message || 'Deploy failed') : undefined,
+        error: parsed.status !== 0 ? (parsed.message || 'Deploy/Validate failed') : undefined,
         rawOutput: result.stdout
       };
     } catch (e) {
@@ -211,6 +226,115 @@ export class SalesforceCli {
         error: result.stderr || `Failed to parse deploy result: ${e}`,
         rawOutput: result.stdout 
       };
+    }
+  }
+
+  /**
+   * Validate metadata using a manifest file (check-only deployment)
+   * Returns detailed error information for missing dependencies
+   */
+  async validateMetadata(manifestPath: string): Promise<SfCommandResult<any> & { 
+    missingMetadata?: Array<{ type: string; name: string }>;
+    errorDetails?: string[];
+  }> {
+    const orgFlag = this.defaultOrg ? `-o ${this.defaultOrg}` : '';
+    const result = await this.execute(
+      `sf project deploy validate --manifest "${manifestPath}" ${orgFlag} --json --wait 30`
+    );
+
+    try {
+      const parsed = JSON.parse(result.stdout);
+      const response: SfCommandResult<any> & { 
+        missingMetadata?: Array<{ type: string; name: string }>;
+        errorDetails?: string[];
+      } = {
+        success: parsed.status === 0,
+        data: parsed.result,
+        error: parsed.status !== 0 ? (parsed.message || 'Validation failed') : undefined,
+        rawOutput: result.stdout
+      };
+
+      // Parse error details to find missing metadata
+      if (!response.success) {
+        response.missingMetadata = [];
+        response.errorDetails = [];
+        
+        // Check for component failures in the result
+        if (parsed.result?.details?.componentFailures) {
+          const failures = Array.isArray(parsed.result.details.componentFailures) 
+            ? parsed.result.details.componentFailures 
+            : [parsed.result.details.componentFailures];
+          
+          for (const failure of failures) {
+            response.errorDetails.push(`${failure.componentType}/${failure.fullName}: ${failure.problem}`);
+            
+            // Check if error mentions missing dependency
+            const problemLower = (failure.problem || '').toLowerCase();
+            if (problemLower.includes('does not exist') || 
+                problemLower.includes('cannot find') ||
+                problemLower.includes('missing') ||
+                problemLower.includes('not found')) {
+              // Try to extract the missing component name from the error
+              const missingMatch = failure.problem.match(/(?:class|flow|type|object)\s+['"]?([A-Za-z0-9_]+)['"]?/i);
+              if (missingMatch) {
+                // Infer type from error message
+                let missingType = 'ApexClass';
+                if (problemLower.includes('flow')) missingType = 'Flow';
+                else if (problemLower.includes('object')) missingType = 'CustomObject';
+                
+                response.missingMetadata.push({
+                  type: missingType,
+                  name: missingMatch[1]
+                });
+              }
+            }
+          }
+        }
+        
+        // Also check the raw error message
+        if (parsed.message) {
+          response.errorDetails.push(parsed.message);
+        }
+      }
+
+      return response;
+    } catch (e) {
+      return { 
+        success: false, 
+        error: result.stderr || `Failed to parse validation result: ${e}`,
+        rawOutput: result.stdout,
+        errorDetails: [result.stderr || String(e)]
+      };
+    }
+  }
+
+  /**
+   * Validate specific components and return detailed results
+   */
+  async validateComponents(
+    components: Array<{ type: string; name: string }>
+  ): Promise<SfCommandResult<any> & { 
+    missingMetadata?: Array<{ type: string; name: string }>;
+    errorDetails?: string[];
+    manifestPath?: string;
+  }> {
+    // Create a temporary manifest
+    const tempDir = path.join(this.projectPath, '.deployment-buddy-temp');
+    await fs.mkdir(tempDir, { recursive: true });
+    
+    // Get API version from target org
+    const apiVersion = await this.getOrgApiVersion();
+    
+    const manifestPath = path.join(tempDir, 'validate-manifest.xml');
+    const manifestContent = this.generatePackageXml(components, apiVersion);
+    await fs.writeFile(manifestPath, manifestContent, 'utf8');
+
+    try {
+      const result = await this.validateMetadata(manifestPath);
+      return { ...result, manifestPath };
+    } finally {
+      // Don't cleanup immediately - might need to inspect the manifest
+      // Cleanup will happen on next validation or deploy
     }
   }
 
@@ -225,8 +349,11 @@ export class SalesforceCli {
     const tempDir = path.join(this.projectPath, '.deployment-buddy-temp');
     await fs.mkdir(tempDir, { recursive: true });
     
+    // Get API version from target org
+    const apiVersion = await this.getOrgApiVersion();
+    
     const manifestPath = path.join(tempDir, 'deploy-manifest.xml');
-    const manifestContent = this.generatePackageXml(components);
+    const manifestContent = this.generatePackageXml(components, apiVersion);
     await fs.writeFile(manifestPath, manifestContent, 'utf8');
 
     try {
@@ -244,8 +371,10 @@ export class SalesforceCli {
 
   /**
    * Generate package.xml content
+   * @param components - Array of components to include
+   * @param apiVersion - Optional API version (defaults to SF_API_VERSION or org's version)
    */
-  generatePackageXml(components: Array<{ type: string; name: string }>): string {
+  generatePackageXml(components: Array<{ type: string; name: string }>, apiVersion?: string): string {
     // Group components by type
     const typeMap = new Map<string, string[]>();
     for (const comp of components) {
@@ -263,10 +392,21 @@ ${membersXml}
     </types>\n`;
     }
 
+    // Use provided apiVersion, or fall back to default
+    const version = apiVersion || SF_API_VERSION;
+
     return `<?xml version="1.0" encoding="UTF-8"?>
 <Package xmlns="http://soap.sforce.com/2006/04/metadata">
-${typesXml}    <version>${SF_API_VERSION}</version>
+${typesXml}    <version>${version}</version>
 </Package>`;
+  }
+
+  /**
+   * Generate package.xml content with org's API version
+   */
+  async generatePackageXmlWithOrgVersion(components: Array<{ type: string; name: string }>): Promise<string> {
+    const apiVersion = await this.getOrgApiVersion();
+    return this.generatePackageXml(components, apiVersion);
   }
 
   /**
@@ -280,7 +420,10 @@ ${typesXml}    <version>${SF_API_VERSION}</version>
       const dir = path.dirname(targetPath);
       await fs.mkdir(dir, { recursive: true });
       
-      const content = this.generatePackageXml(components);
+      // Get API version from target org
+      const apiVersion = await this.getOrgApiVersion();
+      
+      const content = this.generatePackageXml(components, apiVersion);
       await fs.writeFile(targetPath, content, 'utf8');
       
       return { success: true, data: targetPath };

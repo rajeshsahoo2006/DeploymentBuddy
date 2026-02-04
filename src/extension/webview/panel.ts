@@ -209,13 +209,29 @@ export class DeploymentBuddyPanel {
         
         const deployResult = await this._mcpManager.callTool('deploy_plan', {
           plan: message.plan,
-          checkOnly: message.checkOnly
+          checkOnly: false  // Always false for actual deployment
         });
         
         this._panel.webview.postMessage({
           command: 'deployResult',
           data: deployResult.data,
           error: deployResult.error
+        });
+        break;
+
+      case 'validatePlan':
+        this._panel.webview.postMessage({
+          command: 'validationStarted'
+        });
+        
+        const validateResult = await this._mcpManager.callTool('validate_plan', {
+          plan: message.plan
+        });
+        
+        this._panel.webview.postMessage({
+          command: 'validationResult',
+          data: validateResult.data,
+          error: validateResult.error
         });
         break;
 
@@ -1042,6 +1058,20 @@ export class DeploymentBuddyPanel {
                     document.getElementById('deployBtn').disabled = false;
                     break;
                 
+                case 'validationStarted':
+                    log('Validation started...', 'info');
+                    break;
+                    
+                case 'validationResult':
+                    document.getElementById('validateBtn').disabled = false;
+                    document.getElementById('validateBtn').textContent = 'Validate';
+                    if (message.data) {
+                        renderValidationResult(message.data);
+                    } else if (message.error) {
+                        log('Validation error: ' + message.error, 'error');
+                    }
+                    break;
+                
                 case 'retrieveStatus':
                     updateRetrieveStatus(message.status);
                     break;
@@ -1746,11 +1776,13 @@ export class DeploymentBuddyPanel {
                 return;
             }
             
-            log('Validating (check only) against: ' + selectedOrg, 'info');
+            log('Starting batch-by-batch validation against: ' + selectedOrg, 'info');
+            document.getElementById('validateBtn').disabled = true;
+            document.getElementById('validateBtn').textContent = 'Validating...';
+            
             vscode.postMessage({
-                command: 'deployPlan',
-                plan: currentPlan,
-                checkOnly: true
+                command: 'validatePlan',
+                plan: currentPlan
             });
         }
         
@@ -1786,6 +1818,81 @@ export class DeploymentBuddyPanel {
                             log(error.componentType + '/' + error.componentName + ': ' + error.message, 'error');
                         }
                     }
+                }
+            }
+        }
+        
+        function renderValidationResult(result) {
+            const container = document.getElementById('deployPlanPanel');
+            
+            if (result.success) {
+                log('✅ Validation PASSED! All ' + result.totalBatches + ' batches validated successfully.', 'success');
+                log('Duration: ' + (result.overallDuration / 1000).toFixed(1) + 's', 'info');
+                
+                // Update batch status indicators to success
+                for (let i = 1; i <= result.totalBatches; i++) {
+                    updateBatchStatus(i, 'success');
+                }
+            } else {
+                log('❌ Validation FAILED at batch ' + result.failedAtBatch, 'error');
+                
+                // Update batch status indicators
+                for (let i = 1; i <= result.totalBatches; i++) {
+                    if (i < result.failedAtBatch) {
+                        updateBatchStatus(i, 'success');
+                    } else if (i === result.failedAtBatch) {
+                        updateBatchStatus(i, 'error');
+                    } else {
+                        updateBatchStatus(i, 'pending');
+                    }
+                }
+                
+                // Show detailed errors
+                for (const batchResult of result.results) {
+                    if (!batchResult.success && batchResult.errors && batchResult.errors.length > 0) {
+                        log('Batch ' + batchResult.batchNumber + ' (' + batchResult.metadataType + ') errors:', 'error');
+                        for (const error of batchResult.errors) {
+                            log('  • ' + error, 'error');
+                        }
+                    }
+                }
+                
+                // Show suggestion for missing metadata
+                if (result.missingMetadataFoundLocally && result.missingMetadataFoundLocally.length > 0) {
+                    log('', 'info');
+                    log('💡 Found missing dependencies that exist in your local project:', 'info');
+                    for (const missing of result.missingMetadataFoundLocally) {
+                        log('  → ' + missing.type + ': ' + missing.name, 'info');
+                    }
+                    log('Consider adding these to your selection and rebuilding the plan.', 'info');
+                    
+                    // Auto-add missing metadata to selection
+                    if (confirm('Add missing dependencies to selection and rebuild plan?')) {
+                        for (const missing of result.missingMetadataFoundLocally) {
+                            const key = missing.type + ':' + missing.name;
+                            if (!selectedItems.has(key)) {
+                                selectedItems.add(key);
+                            }
+                        }
+                        renderMetadataTree();
+                        updateDependenciesPanel();
+                        log('Added ' + result.missingMetadataFoundLocally.length + ' missing dependencies. Click "Build Plan" to create a new plan.', 'success');
+                    }
+                }
+                
+                if (result.suggestion) {
+                    log('', 'info');
+                    log('Suggestion: ' + result.suggestion, 'info');
+                }
+            }
+        }
+        
+        function updateBatchStatus(batchNumber, status) {
+            const batchItems = document.querySelectorAll('.batch-item');
+            if (batchItems[batchNumber - 1]) {
+                const statusIndicator = batchItems[batchNumber - 1].querySelector('.status-indicator');
+                if (statusIndicator) {
+                    statusIndicator.className = 'status-indicator status-' + status;
                 }
             }
         }

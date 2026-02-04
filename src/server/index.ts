@@ -252,6 +252,20 @@ const TOOLS: Tool[] = [
       },
       required: ['plan']
     }
+  },
+  {
+    name: 'validate_plan',
+    description: 'Validate a deployment plan batch by batch. Creates cumulative package.xml for each batch and runs sf project deploy validate. Identifies missing metadata and suggests fixes.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        plan: {
+          type: 'object',
+          description: 'Deployment plan object from build_deploy_plan'
+        }
+      },
+      required: ['plan']
+    }
   }
 ];
 
@@ -720,6 +734,112 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
             text: JSON.stringify(planResult, null, 2)
           }],
           isError: !planResult.success
+        };
+      }
+
+      case 'validate_plan': {
+        const plan = (args as any)?.plan as DeployPlan;
+        
+        if (!plan || !plan.batches) {
+          return {
+            content: [{ type: 'text', text: 'Error: valid plan object is required' }],
+            isError: true
+          };
+        }
+        
+        const overallStart = Date.now();
+        const batchResults: Array<{
+          batchNumber: number;
+          metadataType: string;
+          success: boolean;
+          errors: string[];
+          missingMetadata: Array<{ type: string; name: string }>;
+          componentsValidated: number;
+        }> = [];
+        
+        // Validate batch by batch with cumulative components
+        const cumulativeComponents: Array<{ type: string; name: string }> = [];
+        let failedAtBatch: number | undefined;
+        const allMissingMetadata: Array<{ type: string; name: string }> = [];
+        
+        for (const batch of plan.batches) {
+          // Add this batch's components to cumulative list
+          const batchComponents = batch.items.map(item => ({
+            type: item.type,
+            name: item.name
+          }));
+          cumulativeComponents.push(...batchComponents);
+          
+          // Validate cumulative components up to this batch
+          const result = await salesforceCli.validateComponents(cumulativeComponents);
+          
+          const batchResult = {
+            batchNumber: batch.batchNumber,
+            metadataType: batch.metadataType,
+            success: result.success,
+            errors: result.errorDetails || [],
+            missingMetadata: result.missingMetadata || [],
+            componentsValidated: cumulativeComponents.length
+          };
+          
+          if (!result.success) {
+            // Collect missing metadata for potential auto-fix
+            if (result.missingMetadata && result.missingMetadata.length > 0) {
+              for (const missing of result.missingMetadata) {
+                // Check if this metadata exists locally
+                const existsLocally = await checkMetadataExistsLocally(missing.type, missing.name);
+                if (existsLocally) {
+                  allMissingMetadata.push(missing);
+                }
+              }
+            }
+            
+            failedAtBatch = batch.batchNumber;
+            batchResults.push(batchResult);
+            break; // Stop on first failure
+          }
+          
+          batchResults.push(batchResult);
+        }
+        
+        // Helper function to check if metadata exists locally
+        async function checkMetadataExistsLocally(type: string, name: string): Promise<boolean> {
+          try {
+            if (type === 'ApexClass') {
+              const classes = await metadataParser.listApexClasses();
+              return classes.includes(name);
+            } else if (type === 'Flow') {
+              const flows = await metadataParser.listFlows();
+              return flows.includes(name);
+            } else if (type === 'GenAiFunction' || type === 'GenAiPlugin' || type === 'GenAiPlannerBundle') {
+              const assets = await metadataParser.listGenAiAssets(type as any);
+              return assets.some(a => a.name === name);
+            }
+            return false;
+          } catch {
+            return false;
+          }
+        }
+        
+        const validationResult = {
+          success: failedAtBatch === undefined,
+          completedBatches: batchResults.filter(r => r.success).length,
+          totalBatches: plan.batches.length,
+          results: batchResults,
+          failedAtBatch,
+          missingMetadataFoundLocally: allMissingMetadata,
+          overallDuration: Date.now() - overallStart,
+          suggestion: allMissingMetadata.length > 0 
+            ? `Found ${allMissingMetadata.length} missing dependencies that exist locally. Consider adding them to the plan: ${allMissingMetadata.map(m => `${m.type}:${m.name}`).join(', ')}`
+            : undefined
+        };
+        
+        return {
+          content: [{
+            type: 'text',
+            text: JSON.stringify(validationResult, null, 2)
+          }],
+          isError: !validationResult.success
         };
       }
 
