@@ -188,6 +188,7 @@ export class DependencyGraph {
   /**
    * Expand selection with ALL discovered dependencies from recursive analysis
    * This includes transitive dependencies like Bot → Planner → Function → Flow → Apex
+   * Only includes dependencies that exist locally - skips missing ones with warnings
    */
   private async expandWithAllDependencies(
     selected: DeployItem[],
@@ -200,79 +201,117 @@ export class DependencyGraph {
   ): Promise<DeployItem[]> {
     const expanded = new Map<string, DeployItem>();
     
+    // Load local metadata to check existence
+    const localApexClasses = await this.parser.listApexClasses();
+    const localFlows = await this.parser.listFlows();
+    const localGenAiAssets = await this.parser.listGenAiAssets();
+    
+    // Create lookup sets for faster checking
+    const localApexSet = new Set(localApexClasses);
+    const localFlowSet = new Set(localFlows);
+    const localFunctionSet = new Set(
+      localGenAiAssets.filter(a => a.type === 'GenAiFunction').map(a => a.name)
+    );
+    const localPluginSet = new Set(
+      localGenAiAssets.filter(a => a.type === 'GenAiPlugin').map(a => a.name)
+    );
+    const localPlannerSet = new Set(
+      localGenAiAssets.filter(a => a.type === 'GenAiPlannerBundle').map(a => a.name)
+    );
+    
     // Add all selected items first
     for (const item of selected) {
       const key = `${item.type}:${item.name}`;
       expanded.set(key, item);
     }
 
-    // Add all discovered Apex classes
+    // Add discovered Apex classes (only if they exist locally)
     for (const className of apexClasses) {
       const key = `ApexClass:${className}`;
       if (!expanded.has(key)) {
-        expanded.set(key, {
-          type: 'ApexClass',
-          name: className,
-          fullName: className,
-          filePath: ''
-        });
-        warnings.push(`Added Apex dependency: ${className}`);
+        if (localApexSet.has(className)) {
+          expanded.set(key, {
+            type: 'ApexClass',
+            name: className,
+            fullName: className,
+            filePath: ''
+          });
+          warnings.push(`Added Apex dependency: ${className}`);
+        } else {
+          warnings.push(`Skipped Apex dependency (not found locally): ${className}`);
+        }
       }
     }
 
-    // Add all discovered Flows
+    // Add discovered Flows (only if they exist locally)
     for (const flowName of flows) {
       const key = `Flow:${flowName}`;
       if (!expanded.has(key)) {
-        expanded.set(key, {
-          type: 'Flow',
-          name: flowName,
-          fullName: flowName,
-          filePath: ''
-        });
-        warnings.push(`Added Flow dependency: ${flowName}`);
+        if (localFlowSet.has(flowName)) {
+          expanded.set(key, {
+            type: 'Flow',
+            name: flowName,
+            fullName: flowName,
+            filePath: ''
+          });
+          warnings.push(`Added Flow dependency: ${flowName}`);
+        } else {
+          warnings.push(`Skipped Flow dependency (not found locally): ${flowName}`);
+        }
       }
     }
 
-    // Add all discovered GenAI Functions
+    // Add discovered GenAI Functions (only if they exist locally)
     for (const funcName of genAiFunctions) {
       const key = `GenAiFunction:${funcName}`;
       if (!expanded.has(key)) {
-        expanded.set(key, {
-          type: 'GenAiFunction',
-          name: funcName,
-          fullName: funcName,
-          filePath: ''
-        });
-        warnings.push(`Added GenAiFunction dependency: ${funcName}`);
+        if (localFunctionSet.has(funcName)) {
+          expanded.set(key, {
+            type: 'GenAiFunction',
+            name: funcName,
+            fullName: funcName,
+            filePath: ''
+          });
+          warnings.push(`Added GenAiFunction dependency: ${funcName}`);
+        } else {
+          warnings.push(`Skipped GenAiFunction dependency (not found locally): ${funcName}`);
+        }
       }
     }
 
-    // Add all discovered GenAI Plugins
+    // Add discovered GenAI Plugins (only if they exist locally)
     for (const pluginName of genAiPlugins) {
       const key = `GenAiPlugin:${pluginName}`;
       if (!expanded.has(key)) {
-        expanded.set(key, {
-          type: 'GenAiPlugin',
-          name: pluginName,
-          fullName: pluginName,
-          filePath: ''
-        });
-        warnings.push(`Added GenAiPlugin dependency: ${pluginName}`);
+        if (localPluginSet.has(pluginName)) {
+          expanded.set(key, {
+            type: 'GenAiPlugin',
+            name: pluginName,
+            fullName: pluginName,
+            filePath: ''
+          });
+          warnings.push(`Added GenAiPlugin dependency: ${pluginName}`);
+        } else {
+          warnings.push(`Skipped GenAiPlugin dependency (not found locally): ${pluginName}`);
+        }
       }
     }
 
-    // Add all discovered GenAI Planner Bundles
+    // Add discovered GenAI Planner Bundles (only if they exist locally)
     for (const plannerName of genAiPlannerBundles) {
       const key = `GenAiPlannerBundle:${plannerName}`;
       if (!expanded.has(key)) {
-        expanded.set(key, {
-          type: 'GenAiPlannerBundle',
-          name: plannerName,
-          fullName: plannerName,
-          filePath: ''
-        });
-        warnings.push(`Added GenAiPlannerBundle dependency: ${plannerName}`);
+        if (localPlannerSet.has(plannerName)) {
+          expanded.set(key, {
+            type: 'GenAiPlannerBundle',
+            name: plannerName,
+            fullName: plannerName,
+            filePath: ''
+          });
+          warnings.push(`Added GenAiPlannerBundle dependency: ${plannerName}`);
+        } else {
+          warnings.push(`Skipped GenAiPlannerBundle dependency (not found locally): ${plannerName}`);
+        }
       }
     }
     

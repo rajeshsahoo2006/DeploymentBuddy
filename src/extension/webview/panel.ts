@@ -672,6 +672,82 @@ export class DeploymentBuddyPanel {
             background: var(--vscode-inputValidation-warningBackground);
             border: 1px solid var(--vscode-inputValidation-warningBorder);
         }
+        
+        /* Version Selection Modal */
+        .modal-overlay {
+            display: none;
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background: rgba(0, 0, 0, 0.5);
+            z-index: 1000;
+            justify-content: center;
+            align-items: center;
+        }
+        
+        .modal-overlay.active {
+            display: flex;
+        }
+        
+        .modal {
+            background: var(--vscode-editor-background);
+            border: 1px solid var(--vscode-panel-border);
+            border-radius: 8px;
+            padding: 20px;
+            min-width: 350px;
+            max-width: 500px;
+            box-shadow: 0 4px 20px rgba(0, 0, 0, 0.3);
+        }
+        
+        .modal-header {
+            font-size: 1.1em;
+            font-weight: 600;
+            margin-bottom: 15px;
+            padding-bottom: 10px;
+            border-bottom: 1px solid var(--vscode-panel-border);
+        }
+        
+        .modal-body {
+            margin-bottom: 20px;
+        }
+        
+        .version-list {
+            max-height: 200px;
+            overflow-y: auto;
+        }
+        
+        .version-item {
+            padding: 10px 12px;
+            cursor: pointer;
+            border-radius: 4px;
+            margin-bottom: 5px;
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            background: var(--vscode-editor-inactiveSelectionBackground);
+        }
+        
+        .version-item:hover {
+            background: var(--vscode-list-hoverBackground);
+        }
+        
+        .version-item.selected {
+            background: var(--vscode-list-activeSelectionBackground);
+            color: var(--vscode-list-activeSelectionForeground);
+        }
+        
+        .version-radio {
+            width: 16px;
+            height: 16px;
+        }
+        
+        .modal-footer {
+            display: flex;
+            justify-content: flex-end;
+            gap: 10px;
+        }
     </style>
 </head>
 <body>
@@ -798,6 +874,25 @@ export class DeploymentBuddyPanel {
             </div>
         </div>
     </div>
+    
+    <!-- Version Selection Modal -->
+    <div class="modal-overlay" id="versionModal">
+        <div class="modal">
+            <div class="modal-header">Select Bot Version</div>
+            <div class="modal-body">
+                <p style="margin-bottom: 15px; color: var(--vscode-descriptionForeground);">
+                    This bot has multiple versions. Please select the version you want to deploy:
+                </p>
+                <div class="version-list" id="versionList">
+                    <!-- Versions will be populated here -->
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button class="btn btn-secondary" onclick="closeVersionModal()">Cancel</button>
+                <button class="btn btn-primary" id="selectVersionBtn" onclick="confirmVersionSelection()" disabled>Select Version</button>
+            </div>
+        </div>
+    </div>
 
     <script>
         const vscode = acquireVsCodeApi();
@@ -813,6 +908,10 @@ export class DeploymentBuddyPanel {
         let orgInfo = null;
         let targetOrg = null;
         let isRetrieving = false;
+        
+        // Version selection state
+        let pendingBotSelection = null;  // Bot waiting for version selection
+        let selectedVersion = null;      // Currently selected version in modal
         
         // Initialize
         window.addEventListener('load', () => {
@@ -846,6 +945,16 @@ export class DeploymentBuddyPanel {
                     if (bot && message.data) {
                         bot.versions = message.data.versions || [];
                         renderMetadataTree();
+                        
+                        // If this is a pending bot selection, show version modal
+                        if (pendingBotSelection && pendingBotSelection.name === message.botName) {
+                            if (bot.versions.length > 0) {
+                                showVersionModal(bot);
+                            } else {
+                                // No versions found, just select the bot
+                                completeBotSelection(pendingBotSelection.name, null, pendingBotSelection.element);
+                            }
+                        }
                     }
                     break;
                     
@@ -1220,7 +1329,39 @@ export class DeploymentBuddyPanel {
                 element.classList.remove('selected');
                 const checkbox = element.querySelector('input[type="checkbox"]');
                 if (checkbox) checkbox.checked = false;
+                
+                // If deselecting a Bot, also remove its associated BotVersion
+                if (type === 'Bot') {
+                    const bot = bots.find(b => b.name === name);
+                    if (bot && bot.versions) {
+                        for (const version of bot.versions) {
+                            selectedItems.delete('BotVersion:' + version.fullName);
+                        }
+                    }
+                }
             } else {
+                // Special handling for Bot selection - prompt for version
+                if (type === 'Bot') {
+                    const bot = bots.find(b => b.name === name);
+                    
+                    // Store pending selection
+                    pendingBotSelection = { name, element };
+                    
+                    // If versions already loaded, show modal directly
+                    if (bot && bot.versions && bot.versions.length > 0) {
+                        showVersionModal(bot);
+                    } else {
+                        // Fetch versions first
+                        log('Loading versions for ' + name + '...', 'info');
+                        vscode.postMessage({
+                            command: 'listBotVersions',
+                            botName: name
+                        });
+                    }
+                    return; // Don't complete selection yet
+                }
+                
+                // Normal selection for non-Bot types
                 selectedItems.add(key);
                 element.classList.add('selected');
                 const checkbox = element.querySelector('input[type="checkbox"]');
@@ -1233,12 +1374,94 @@ export class DeploymentBuddyPanel {
                     assetName: name
                 });
                 
-                // Show hint for auto-select if it's a Bot or GenAI asset
-                if (type === 'Bot' || type === 'GenAiPlannerBundle' || type === 'GenAiPlugin' || type === 'GenAiFunction') {
+                // Show hint for auto-select if it's a GenAI asset
+                if (type === 'GenAiPlannerBundle' || type === 'GenAiPlugin' || type === 'GenAiFunction') {
                     log('Tip: Click "Auto-select Dependencies" to find all required Apex classes and Flows for ' + name, 'info');
                 }
             }
             updateDependenciesPanel();
+        }
+        
+        function showVersionModal(bot) {
+            const modal = document.getElementById('versionModal');
+            const versionList = document.getElementById('versionList');
+            selectedVersion = null;
+            
+            let html = '';
+            for (const version of bot.versions) {
+                const versionNum = version.versionNumber ? ' (v' + version.versionNumber + ')' : '';
+                html += '<div class="version-item" onclick="selectVersion(this, \\'' + version.fullName + '\\')">';
+                html += '<input type="radio" name="version" class="version-radio" value="' + version.fullName + '">';
+                html += '<span>' + version.name + versionNum + '</span>';
+                html += '</div>';
+            }
+            
+            versionList.innerHTML = html;
+            document.getElementById('selectVersionBtn').disabled = true;
+            modal.classList.add('active');
+        }
+        
+        function selectVersion(element, versionFullName) {
+            // Remove selection from all items
+            document.querySelectorAll('.version-item').forEach(item => {
+                item.classList.remove('selected');
+                item.querySelector('input').checked = false;
+            });
+            
+            // Select this item
+            element.classList.add('selected');
+            element.querySelector('input').checked = true;
+            selectedVersion = versionFullName;
+            document.getElementById('selectVersionBtn').disabled = false;
+        }
+        
+        function closeVersionModal() {
+            document.getElementById('versionModal').classList.remove('active');
+            pendingBotSelection = null;
+            selectedVersion = null;
+        }
+        
+        function confirmVersionSelection() {
+            if (!selectedVersion || !pendingBotSelection) return;
+            
+            completeBotSelection(pendingBotSelection.name, selectedVersion, pendingBotSelection.element);
+            closeVersionModal();
+        }
+        
+        function completeBotSelection(botName, versionFullName, element) {
+            // Add both Bot and BotVersion to selection
+            selectedItems.add('Bot:' + botName);
+            
+            if (versionFullName) {
+                selectedItems.add('BotVersion:' + versionFullName);
+                log('Selected ' + botName + ' with version: ' + versionFullName, 'success');
+            } else {
+                log('Selected ' + botName + ' (no versions found)', 'info');
+            }
+            
+            // Update UI
+            if (element) {
+                element.classList.add('selected');
+                const checkbox = element.querySelector('input[type="checkbox"]');
+                if (checkbox) checkbox.checked = true;
+            }
+            
+            // Analyze references for the BotVersion (which contains the planner reference)
+            // If no version, analyze the Bot itself
+            const typeToAnalyze = versionFullName ? 'BotVersion' : 'Bot';
+            const nameToAnalyze = versionFullName || botName;
+            
+            vscode.postMessage({
+                command: 'analyzeReferences',
+                assetType: typeToAnalyze,
+                assetName: nameToAnalyze
+            });
+            
+            log('Tip: Click "Auto-select Dependencies" to find all required components for ' + botName, 'info');
+            
+            pendingBotSelection = null;
+            updateDependenciesPanel();
+            renderMetadataTree();
         }
         
         function selectAll() {
@@ -1278,8 +1501,16 @@ export class DeploymentBuddyPanel {
             
             let html = '<div><strong>Selected Items (' + selectedItems.size + '):</strong></div>';
             for (const item of selectedItems) {
-                const [type, name] = item.split(':');
-                html += '<div class="dependency-item"><span>' + name + '</span><span class="dependency-type">' + type + '</span></div>';
+                const [type, ...nameParts] = item.split(':');
+                const name = nameParts.join(':'); // Handle names that might contain ':'
+                
+                // Special display for BotVersion
+                if (type === 'BotVersion') {
+                    const [botName, versionName] = name.split('.');
+                    html += '<div class="dependency-item"><span>' + botName + ' → ' + versionName + '</span><span class="dependency-type">' + type + '</span></div>';
+                } else {
+                    html += '<div class="dependency-item"><span>' + name + '</span><span class="dependency-type">' + type + '</span></div>';
+                }
             }
             container.innerHTML = html;
         }
@@ -1297,14 +1528,26 @@ export class DeploymentBuddyPanel {
         }
         
         function analyzeAndSelectDependencies() {
-            // Find the first selected Bot or GenAI asset to analyze
+            // Find the first selected Bot/BotVersion or GenAI asset to analyze
             let assetToAnalyze = null;
             
+            // First priority: Look for BotVersion (contains the planner reference)
             for (const item of selectedItems) {
                 const [type, name] = item.split(':');
-                if (type === 'Bot' || type === 'GenAiPlannerBundle' || type === 'GenAiPlugin' || type === 'GenAiFunction') {
+                if (type === 'BotVersion') {
                     assetToAnalyze = { type, name };
                     break;
+                }
+            }
+            
+            // Second priority: Look for Bot (will analyze all versions) or GenAI assets
+            if (!assetToAnalyze) {
+                for (const item of selectedItems) {
+                    const [type, name] = item.split(':');
+                    if (type === 'Bot' || type === 'GenAiPlannerBundle' || type === 'GenAiPlugin' || type === 'GenAiFunction') {
+                        assetToAnalyze = { type, name };
+                        break;
+                    }
                 }
             }
             
@@ -1313,7 +1556,7 @@ export class DeploymentBuddyPanel {
                 return;
             }
             
-            log('Analyzing all dependencies for: ' + assetToAnalyze.name, 'info');
+            log('Analyzing all dependencies for: ' + assetToAnalyze.name + ' (' + assetToAnalyze.type + ')', 'info');
             vscode.postMessage({
                 command: 'analyzeAllDependencies',
                 assetType: assetToAnalyze.type,

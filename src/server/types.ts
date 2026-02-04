@@ -127,4 +127,4 @@ export const DEPLOYMENT_LAYER_ORDER: MetadataType[] = [
 ];
 
 // API version for Salesforce
-export const SF_API_VERSION = '59.0';
+export const SF_API_VERSION = '66.0';
