@@ -230,11 +230,154 @@ export class SalesforceCli {
   }
 
   /**
+   * Parse validation errors to extract missing custom objects and fields
+   */
+  parseMissingMetadataErrors(errorDetails: string[]): Array<{ type: string; name: string; objectName?: string }> {
+    const missing: Array<{ type: string; name: string; objectName?: string }> = [];
+    
+    for (const error of errorDetails) {
+      // Pattern: "The field \"FieldName__c\" for the object \"ObjectName\" doesn't exist."
+      const fieldMatch = error.match(/field\s+["']([A-Za-z0-9_]+__c)["']\s+for\s+the\s+object\s+["']([A-Za-z0-9_]+)["']/i);
+      if (fieldMatch) {
+        missing.push({
+          type: 'CustomField',
+          name: fieldMatch[1],
+          objectName: fieldMatch[2]
+        });
+        continue;
+      }
+      
+      // Pattern: "The object \"ObjectName\" doesn't exist."
+      const objectMatch = error.match(/object\s+["']([A-Za-z0-9_]+)["']\s+doesn't\s+exist/i);
+      if (objectMatch) {
+        missing.push({
+          type: 'CustomObject',
+          name: objectMatch[1]
+        });
+        continue;
+      }
+      
+      // Pattern with object ID: "The field \"FieldName__c\" for the object \"01I...\" doesn't exist."
+      // Need to resolve object ID to name
+      const fieldWithIdMatch = error.match(/field\s+["']([A-Za-z0-9_]+__c)["']\s+for\s+the\s+object\s+["']([0-9A-Za-z]+)["']/i);
+      if (fieldWithIdMatch) {
+        missing.push({
+          type: 'CustomField',
+          name: fieldWithIdMatch[1],
+          objectName: fieldWithIdMatch[2] // This is an ID, will need to resolve
+        });
+      }
+    }
+    
+    return missing;
+  }
+
+  /**
+   * Resolve object ID to object API name by checking local project
+   */
+  async resolveObjectIdToName(objectId: string): Promise<string | null> {
+    // Object IDs typically start with specific prefixes (e.g., 01I for custom objects)
+    // Try to find the object in local project
+    const objectsPath = path.join(this.projectPath, 'force-app', 'main', 'default', 'objects');
+    
+    try {
+      const entries = await fs.readdir(objectsPath, { withFileTypes: true });
+      for (const entry of entries) {
+        if (entry.isDirectory()) {
+          // Check if this object's metadata file contains the ID
+          const objectMetaPath = path.join(objectsPath, entry.name, `${entry.name}.object-meta.xml`);
+          try {
+            const content = await fs.readFile(objectMetaPath, 'utf8');
+            // Check if the file contains the object ID (in fullName or other fields)
+            if (content.includes(objectId)) {
+              return entry.name;
+            }
+          } catch {
+            // Continue searching
+          }
+        }
+      }
+    } catch {
+      // Objects directory doesn't exist
+    }
+    
+    return null;
+  }
+
+  /**
+   * Retrieve specific custom object or field from org
+   */
+  async retrieveCustomMetadata(
+    metadataType: 'CustomObject' | 'CustomField',
+    name: string,
+    objectName?: string
+  ): Promise<SfCommandResult<string>> {
+    const orgFlag = this.defaultOrg ? `-o ${this.defaultOrg}` : '';
+    
+    let metadataTypeArg: string;
+    let metadataName: string;
+    
+    if (metadataType === 'CustomObject') {
+      metadataTypeArg = 'CustomObject';
+      metadataName = name;
+    } else {
+      // For CustomField, format is ObjectName.FieldName__c
+      metadataTypeArg = 'CustomField';
+      
+      // If objectName looks like an ID (starts with numbers), try to resolve it
+      if (objectName && /^[0-9]/.test(objectName)) {
+        const resolvedName = await this.resolveObjectIdToName(objectName);
+        if (resolvedName) {
+          metadataName = `${resolvedName}.${name}`;
+        } else {
+          // Can't resolve ID, return error
+          return {
+            success: false,
+            error: `Cannot resolve object ID ${objectName} to object name. Please retrieve the CustomObject first or specify the object API name.`
+          };
+        }
+      } else {
+        metadataName = objectName ? `${objectName}.${name}` : name;
+      }
+    }
+    
+    const result = await this.execute(
+      `sf project retrieve start --metadata ${metadataTypeArg}:${metadataName} ${orgFlag} --json`
+    );
+
+    if (!result.success && !result.stdout.includes('"status": 0')) {
+      return { success: false, error: result.stderr, rawOutput: result.stdout };
+    }
+
+    try {
+      const parsed = JSON.parse(result.stdout);
+      if (parsed.status === 0) {
+        return {
+          success: true,
+          data: `Retrieved ${metadataType}: ${metadataName}`,
+          rawOutput: result.stdout
+        };
+      }
+      return { 
+        success: false, 
+        error: parsed.message || 'Retrieve failed',
+        rawOutput: result.stdout 
+      };
+    } catch (e) {
+      return { 
+        success: result.success, 
+        data: result.stdout,
+        rawOutput: result.stdout 
+      };
+    }
+  }
+
+  /**
    * Validate metadata using a manifest file (check-only deployment)
    * Returns detailed error information for missing dependencies
    */
   async validateMetadata(manifestPath: string): Promise<SfCommandResult<any> & { 
-    missingMetadata?: Array<{ type: string; name: string }>;
+    missingMetadata?: Array<{ type: string; name: string; objectName?: string }>;
     errorDetails?: string[];
   }> {
     const orgFlag = this.defaultOrg ? `-o ${this.defaultOrg}` : '';
@@ -266,28 +409,8 @@ export class SalesforceCli {
             : [parsed.result.details.componentFailures];
           
           for (const failure of failures) {
-            response.errorDetails.push(`${failure.componentType}/${failure.fullName}: ${failure.problem}`);
-            
-            // Check if error mentions missing dependency
-            const problemLower = (failure.problem || '').toLowerCase();
-            if (problemLower.includes('does not exist') || 
-                problemLower.includes('cannot find') ||
-                problemLower.includes('missing') ||
-                problemLower.includes('not found')) {
-              // Try to extract the missing component name from the error
-              const missingMatch = failure.problem.match(/(?:class|flow|type|object)\s+['"]?([A-Za-z0-9_]+)['"]?/i);
-              if (missingMatch) {
-                // Infer type from error message
-                let missingType = 'ApexClass';
-                if (problemLower.includes('flow')) missingType = 'Flow';
-                else if (problemLower.includes('object')) missingType = 'CustomObject';
-                
-                response.missingMetadata.push({
-                  type: missingType,
-                  name: missingMatch[1]
-                });
-              }
-            }
+            const errorMsg = `${failure.componentType}/${failure.fullName}: ${failure.problem}`;
+            response.errorDetails.push(errorMsg);
           }
         }
         
@@ -295,6 +418,10 @@ export class SalesforceCli {
         if (parsed.message) {
           response.errorDetails.push(parsed.message);
         }
+        
+        // Parse all error details to extract missing custom objects and fields
+        const parsedMissing = this.parseMissingMetadataErrors(response.errorDetails);
+        response.missingMetadata = parsedMissing;
       }
 
       return response;

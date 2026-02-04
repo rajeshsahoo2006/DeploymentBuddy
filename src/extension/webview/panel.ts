@@ -1825,6 +1825,16 @@ export class DeploymentBuddyPanel {
         function renderValidationResult(result) {
             const container = document.getElementById('deployPlanPanel');
             
+            // Show retrieved metadata info if any
+            if (result.retrievedMetadata && result.retrievedMetadata.length > 0) {
+                log('', 'info');
+                log('📥 Retrieved ' + result.retrievedMetadata.length + ' missing custom metadata components from org:', 'success');
+                for (const retrieved of result.retrievedMetadata) {
+                    log('  ✓ ' + retrieved.type + ': ' + retrieved.name, 'success');
+                }
+                log('These components have been added to your local project.', 'info');
+            }
+            
             if (result.success) {
                 log('✅ Validation PASSED! All ' + result.totalBatches + ' batches validated successfully.', 'success');
                 log('Duration: ' + (result.overallDuration / 1000).toFixed(1) + 's', 'info');

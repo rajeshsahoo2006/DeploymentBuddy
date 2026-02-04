@@ -760,7 +760,8 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         // Validate batch by batch with cumulative components
         const cumulativeComponents: Array<{ type: string; name: string }> = [];
         let failedAtBatch: number | undefined;
-        const allMissingMetadata: Array<{ type: string; name: string }> = [];
+        const allMissingMetadata: Array<{ type: string; name: string; objectName?: string }> = [];
+        const retrievedMetadata: Array<{ type: string; name: string }> = [];
         
         for (const batch of plan.batches) {
           // Add this batch's components to cumulative list
@@ -770,8 +771,50 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           }));
           cumulativeComponents.push(...batchComponents);
           
-          // Validate cumulative components up to this batch
-          const result = await salesforceCli.validateComponents(cumulativeComponents);
+          // Validate with retry logic for missing custom objects/fields
+          let result = await salesforceCli.validateComponents(cumulativeComponents);
+          let retryCount = 0;
+          const maxRetries = 3;
+          
+          while (!result.success && retryCount < maxRetries) {
+            // Check for missing custom objects/fields that can be retrieved
+            if (result.missingMetadata && result.missingMetadata.length > 0) {
+              const customMetadataToRetrieve = result.missingMetadata.filter(
+                m => m.type === 'CustomObject' || m.type === 'CustomField'
+              );
+              
+              if (customMetadataToRetrieve.length > 0) {
+                // Retrieve missing custom metadata from org
+                for (const missing of customMetadataToRetrieve) {
+                  try {
+                    const retrieveResult = await salesforceCli.retrieveCustomMetadata(
+                      missing.type as 'CustomObject' | 'CustomField',
+                      missing.name,
+                      missing.objectName
+                    );
+                    
+                    if (retrieveResult.success) {
+                      retrievedMetadata.push({
+                        type: missing.type,
+                        name: missing.name
+                      });
+                      console.log(`Retrieved ${missing.type}: ${missing.name}${missing.objectName ? ` (on ${missing.objectName})` : ''}`);
+                    }
+                  } catch (e) {
+                    console.error(`Failed to retrieve ${missing.type}: ${missing.name}`, e);
+                  }
+                }
+                
+                // Retry validation after retrieving metadata
+                retryCount++;
+                result = await salesforceCli.validateComponents(cumulativeComponents);
+                continue;
+              }
+            }
+            
+            // No more custom metadata to retrieve, break retry loop
+            break;
+          }
           
           const batchResult = {
             batchNumber: batch.batchNumber,
@@ -786,10 +829,12 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
             // Collect missing metadata for potential auto-fix
             if (result.missingMetadata && result.missingMetadata.length > 0) {
               for (const missing of result.missingMetadata) {
-                // Check if this metadata exists locally
-                const existsLocally = await checkMetadataExistsLocally(missing.type, missing.name);
-                if (existsLocally) {
-                  allMissingMetadata.push(missing);
+                // Check if this metadata exists locally (for non-custom types)
+                if (missing.type !== 'CustomObject' && missing.type !== 'CustomField') {
+                  const existsLocally = await checkMetadataExistsLocally(missing.type, missing.name);
+                  if (existsLocally) {
+                    allMissingMetadata.push(missing);
+                  }
                 }
               }
             }
@@ -828,10 +873,13 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           results: batchResults,
           failedAtBatch,
           missingMetadataFoundLocally: allMissingMetadata,
+          retrievedMetadata: retrievedMetadata,
           overallDuration: Date.now() - overallStart,
-          suggestion: allMissingMetadata.length > 0 
-            ? `Found ${allMissingMetadata.length} missing dependencies that exist locally. Consider adding them to the plan: ${allMissingMetadata.map(m => `${m.type}:${m.name}`).join(', ')}`
-            : undefined
+          suggestion: retrievedMetadata.length > 0
+            ? `Retrieved ${retrievedMetadata.length} missing custom metadata components from org: ${retrievedMetadata.map(m => `${m.type}:${m.name}`).join(', ')}`
+            : allMissingMetadata.length > 0 
+              ? `Found ${allMissingMetadata.length} missing dependencies that exist locally. Consider adding them to the plan: ${allMissingMetadata.map(m => `${m.type}:${m.name}`).join(', ')}`
+              : undefined
         };
         
         return {
