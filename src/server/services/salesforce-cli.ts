@@ -1,0 +1,320 @@
+/**
+ * Salesforce CLI Wrapper Service
+ * Handles all interactions with the Salesforce CLI (sf commands)
+ */
+
+import { exec } from 'child_process';
+import { promisify } from 'util';
+import * as fs from 'fs/promises';
+import * as path from 'path';
+import { OrgInfo, SF_API_VERSION } from '../types';
+
+const execAsync = promisify(exec);
+
+export interface CommandResult {
+  success: boolean;
+  stdout: string;
+  stderr: string;
+  exitCode: number;
+}
+
+export interface SfCommandResult<T> {
+  success: boolean;
+  data?: T;
+  error?: string;
+  rawOutput?: string;
+}
+
+export class SalesforceCli {
+  private projectPath: string;
+  private defaultOrg?: string;
+
+  constructor(projectPath: string, defaultOrg?: string) {
+    this.projectPath = projectPath;
+    this.defaultOrg = defaultOrg;
+  }
+
+  /**
+   * Execute a shell command
+   */
+  private async execute(command: string, cwd?: string): Promise<CommandResult> {
+    try {
+      const { stdout, stderr } = await execAsync(command, {
+        cwd: cwd || this.projectPath,
+        maxBuffer: 10 * 1024 * 1024, // 10MB buffer for large outputs
+        env: { ...process.env, SF_JSON_RESULT: '1' }
+      });
+      return { success: true, stdout, stderr, exitCode: 0 };
+    } catch (error: any) {
+      return {
+        success: false,
+        stdout: error.stdout || '',
+        stderr: error.stderr || error.message,
+        exitCode: error.code || 1
+      };
+    }
+  }
+
+  /**
+   * Get current org info
+   */
+  async getOrgInfo(targetOrg?: string): Promise<SfCommandResult<OrgInfo>> {
+    const orgFlag = targetOrg || this.defaultOrg ? `-o ${targetOrg || this.defaultOrg}` : '';
+    const result = await this.execute(`sf org display ${orgFlag} --json`);
+
+    if (!result.success) {
+      return { success: false, error: result.stderr };
+    }
+
+    try {
+      const parsed = JSON.parse(result.stdout);
+      if (parsed.status === 0 && parsed.result) {
+        return {
+          success: true,
+          data: {
+            alias: parsed.result.alias || parsed.result.username,
+            username: parsed.result.username,
+            instanceUrl: parsed.result.instanceUrl,
+            orgId: parsed.result.id
+          }
+        };
+      }
+      return { success: false, error: parsed.message || 'Unknown error' };
+    } catch (e) {
+      return { success: false, error: `Failed to parse org info: ${e}` };
+    }
+  }
+
+  /**
+   * List all authenticated Salesforce orgs
+   */
+  async listOrgs(): Promise<SfCommandResult<OrgInfo[]>> {
+    const result = await this.execute('sf org list --json');
+
+    if (!result.success) {
+      return { success: false, error: result.stderr };
+    }
+
+    try {
+      const parsed = JSON.parse(result.stdout);
+      if (parsed.status === 0 && parsed.result) {
+        const orgs: OrgInfo[] = [];
+        
+        // Process scratch orgs
+        if (parsed.result.scratchOrgs) {
+          for (const org of parsed.result.scratchOrgs) {
+            orgs.push({
+              alias: org.alias || org.username,
+              username: org.username,
+              instanceUrl: org.instanceUrl,
+              orgId: org.orgId,
+              isDefault: org.isDefaultUsername || false,
+              isScratch: true
+            });
+          }
+        }
+        
+        // Process non-scratch orgs (sandboxes, production)
+        if (parsed.result.nonScratchOrgs) {
+          for (const org of parsed.result.nonScratchOrgs) {
+            orgs.push({
+              alias: org.alias || org.username,
+              username: org.username,
+              instanceUrl: org.instanceUrl,
+              orgId: org.orgId,
+              isDefault: org.isDefaultUsername || false,
+              isScratch: false
+            });
+          }
+        }
+        
+        // Also check for other orgs in different result structures
+        if (parsed.result.other) {
+          for (const org of parsed.result.other) {
+            orgs.push({
+              alias: org.alias || org.username,
+              username: org.username,
+              instanceUrl: org.instanceUrl,
+              orgId: org.orgId,
+              isDefault: org.isDefaultUsername || false,
+              isScratch: false
+            });
+          }
+        }
+        
+        return { success: true, data: orgs };
+      }
+      return { success: false, error: parsed.message || 'Unknown error' };
+    } catch (e) {
+      return { success: false, error: `Failed to parse org list: ${e}` };
+    }
+  }
+
+  /**
+   * Retrieve metadata using a manifest file
+   */
+  async retrieveMetadata(manifestPath: string): Promise<SfCommandResult<string>> {
+    const orgFlag = this.defaultOrg ? `-o ${this.defaultOrg}` : '';
+    const result = await this.execute(
+      `sf project retrieve start --manifest "${manifestPath}" ${orgFlag} --json`
+    );
+
+    if (!result.success && !result.stdout.includes('"status": 0')) {
+      return { success: false, error: result.stderr, rawOutput: result.stdout };
+    }
+
+    try {
+      const parsed = JSON.parse(result.stdout);
+      if (parsed.status === 0) {
+        return {
+          success: true,
+          data: 'Metadata retrieved successfully',
+          rawOutput: result.stdout
+        };
+      }
+      return { 
+        success: false, 
+        error: parsed.message || 'Retrieve failed',
+        rawOutput: result.stdout 
+      };
+    } catch (e) {
+      // Sometimes the output is not JSON, treat success based on exit code
+      return { 
+        success: result.success, 
+        data: result.stdout,
+        rawOutput: result.stdout 
+      };
+    }
+  }
+
+  /**
+   * Deploy metadata using a manifest file
+   */
+  async deployMetadata(manifestPath: string, checkOnly: boolean = false): Promise<SfCommandResult<any>> {
+    const orgFlag = this.defaultOrg ? `-o ${this.defaultOrg}` : '';
+    const checkFlag = checkOnly ? '--dry-run' : '';
+    const result = await this.execute(
+      `sf project deploy start --manifest "${manifestPath}" ${orgFlag} ${checkFlag} --json --wait 30`
+    );
+
+    try {
+      const parsed = JSON.parse(result.stdout);
+      return {
+        success: parsed.status === 0,
+        data: parsed.result,
+        error: parsed.status !== 0 ? (parsed.message || 'Deploy failed') : undefined,
+        rawOutput: result.stdout
+      };
+    } catch (e) {
+      return { 
+        success: false, 
+        error: result.stderr || `Failed to parse deploy result: ${e}`,
+        rawOutput: result.stdout 
+      };
+    }
+  }
+
+  /**
+   * Deploy specific metadata components
+   */
+  async deployComponents(
+    components: Array<{ type: string; name: string }>,
+    checkOnly: boolean = false
+  ): Promise<SfCommandResult<any>> {
+    // Create a temporary manifest
+    const tempDir = path.join(this.projectPath, '.deployment-buddy-temp');
+    await fs.mkdir(tempDir, { recursive: true });
+    
+    const manifestPath = path.join(tempDir, 'deploy-manifest.xml');
+    const manifestContent = this.generatePackageXml(components);
+    await fs.writeFile(manifestPath, manifestContent, 'utf8');
+
+    try {
+      return await this.deployMetadata(manifestPath, checkOnly);
+    } finally {
+      // Cleanup temp file
+      try {
+        await fs.unlink(manifestPath);
+        await fs.rmdir(tempDir);
+      } catch {
+        // Ignore cleanup errors
+      }
+    }
+  }
+
+  /**
+   * Generate package.xml content
+   */
+  generatePackageXml(components: Array<{ type: string; name: string }>): string {
+    // Group components by type
+    const typeMap = new Map<string, string[]>();
+    for (const comp of components) {
+      const members = typeMap.get(comp.type) || [];
+      members.push(comp.name);
+      typeMap.set(comp.type, members);
+    }
+
+    let typesXml = '';
+    for (const [typeName, members] of typeMap) {
+      const membersXml = members.map(m => `        <members>${m}</members>`).join('\n');
+      typesXml += `    <types>
+${membersXml}
+        <name>${typeName}</name>
+    </types>\n`;
+    }
+
+    return `<?xml version="1.0" encoding="UTF-8"?>
+<Package xmlns="http://soap.sforce.com/2006/04/metadata">
+${typesXml}    <version>${SF_API_VERSION}</version>
+</Package>`;
+  }
+
+  /**
+   * Write a package.xml file to the specified path
+   */
+  async writePackageXml(
+    targetPath: string,
+    components: Array<{ type: string; name: string }>
+  ): Promise<SfCommandResult<string>> {
+    try {
+      const dir = path.dirname(targetPath);
+      await fs.mkdir(dir, { recursive: true });
+      
+      const content = this.generatePackageXml(components);
+      await fs.writeFile(targetPath, content, 'utf8');
+      
+      return { success: true, data: targetPath };
+    } catch (e: any) {
+      return { success: false, error: e.message };
+    }
+  }
+
+  /**
+   * Get project path
+   */
+  getProjectPath(): string {
+    return this.projectPath;
+  }
+
+  /**
+   * Set default org
+   */
+  setDefaultOrg(org: string): void {
+    this.defaultOrg = org;
+  }
+}
+
+/**
+ * Default package.xml content for GenAI Bot deployment
+ */
+export function getDefaultPackageXmlComponents(): Array<{ type: string; name: string }> {
+  return [
+    { type: 'Bot', name: '*' },
+    { type: 'BotVersion', name: '*' },
+    { type: 'GenAiFunction', name: '*' },
+    { type: 'GenAiPlugin', name: '*' },
+    { type: 'GenAiPlannerBundle', name: '*' },
+    { type: 'ApexClass', name: '*' },
+    { type: 'Flow', name: '*' }
+  ];
+}

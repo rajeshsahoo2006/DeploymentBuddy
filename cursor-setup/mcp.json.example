@@ -1,0 +1,14 @@
+{
+  "mcpServers": {
+    "deployment-buddy": {
+      "command": "node",
+      "args": [
+        "/path/to/DeploymentBuddy/dist/server/index.js"
+      ],
+      "env": {
+        "SF_PROJECT_PATH": "/path/to/your/salesforce/project",
+        "SF_DEFAULT_ORG": "your-org-alias"
+      }
+    }
+  }
+}

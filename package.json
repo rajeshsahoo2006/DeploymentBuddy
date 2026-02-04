@@ -1,0 +1,102 @@
+{
+  "name": "deployment-buddy",
+  "displayName": "Deployment Buddy",
+  "description": "MCP-based Salesforce GenAI Bot deployment tool with dependency analysis and batched deployments",
+  "version": "1.0.0",
+  "publisher": "deployment-buddy",
+  "license": "MIT",
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": [
+    "Other"
+  ],
+  "activationEvents": [
+    "onCommand:deploymentBuddy.startServer",
+    "onCommand:deploymentBuddy.stopServer",
+    "onCommand:deploymentBuddy.openUI"
+  ],
+  "main": "./dist/extension/extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "deploymentBuddy.startServer",
+        "title": "Deployment Buddy: Start MCP Server"
+      },
+      {
+        "command": "deploymentBuddy.stopServer",
+        "title": "Deployment Buddy: Stop MCP Server"
+      },
+      {
+        "command": "deploymentBuddy.openUI",
+        "title": "Deployment Buddy: Open Bot Deployer"
+      },
+      {
+        "command": "deploymentBuddy.showLogs",
+        "title": "Deployment Buddy: Show Logs"
+      },
+      {
+        "command": "deploymentBuddy.listBots",
+        "title": "Deployment Buddy: List Bots"
+      },
+      {
+        "command": "deploymentBuddy.analyzeFile",
+        "title": "Deployment Buddy: Analyze Current File"
+      }
+    ],
+    "configuration": {
+      "title": "Deployment Buddy",
+      "properties": {
+        "deploymentBuddy.salesforceProjectPath": {
+          "type": "string",
+          "default": "",
+          "description": "Path to Salesforce project root (containing force-app folder)"
+        },
+        "deploymentBuddy.defaultOrg": {
+          "type": "string",
+          "default": "",
+          "description": "Default Salesforce org alias to use"
+        },
+        "deploymentBuddy.autoStart": {
+          "type": "boolean",
+          "default": false,
+          "description": "Automatically start MCP server when extension activates"
+        }
+      }
+    },
+    "menus": {
+      "editor/context": [
+        {
+          "command": "deploymentBuddy.analyzeFile",
+          "when": "resourceExtname == .xml",
+          "group": "deployment-buddy"
+        }
+      ]
+    }
+  },
+  "scripts": {
+    "vscode:prepublish": "npm run build",
+    "build": "npm run build:server && npm run build:extension",
+    "build:server": "esbuild src/server/index.ts --bundle --platform=node --target=node18 --outfile=dist/server/index.js --external:vscode",
+    "build:extension": "esbuild src/extension/extension.ts --bundle --platform=node --target=node18 --format=cjs --outfile=dist/extension/extension.js --external:vscode",
+    "watch": "npm run watch:server & npm run watch:extension",
+    "watch:server": "esbuild src/server/index.ts --bundle --platform=node --target=node18 --outfile=dist/server/index.js --external:vscode --watch",
+    "watch:extension": "esbuild src/extension/extension.ts --bundle --platform=node --target=node18 --format=cjs --outfile=dist/extension/extension.js --external:vscode --watch",
+    "package": "vsce package --allow-missing-repository",
+    "lint": "eslint src --ext ts",
+    "test": "node --test dist/**/*.test.js"
+  },
+  "dependencies": {
+    "@cfworker/json-schema": "^4.1.1",
+    "@modelcontextprotocol/sdk": "^1.0.0",
+    "fast-xml-parser": "^4.3.2",
+    "zod": "^3.22.4"
+  },
+  "devDependencies": {
+    "@types/node": "^20.10.0",
+    "@types/vscode": "^1.85.0",
+    "@vscode/vsce": "^2.22.0",
+    "esbuild": "^0.19.8",
+    "typescript": "^5.3.2"
+  }
+}
