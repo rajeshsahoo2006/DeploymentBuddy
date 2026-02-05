@@ -61,6 +61,11 @@
           "type": "boolean",
           "default": false,
           "description": "Automatically start MCP server when extension activates"
+        },
+        "deploymentBuddy.nodePath": {
+          "type": "string",
+          "default": "",
+          "description": "Path to Node.js executable (leave empty to auto-detect). Use this if Node.js is not found automatically (e.g., when using nvm). Example: /Users/username/.nvm/versions/node/v22.8.0/bin/node"
         }
       }
     },

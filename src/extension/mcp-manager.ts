@@ -4,8 +4,9 @@
  */
 
 import * as vscode from 'vscode';
-import { spawn, ChildProcess } from 'child_process';
+import { spawn, ChildProcess, execSync } from 'child_process';
 import * as path from 'path';
+import * as fs from 'fs';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
 
@@ -39,6 +40,93 @@ export class McpManager {
   }
 
   /**
+   * Find Node.js executable path
+   * Tries multiple strategies to locate Node.js when PATH is not available
+   */
+  private findNodeExecutable(): string {
+    // Strategy 1: Try process.execPath (VS Code's Node.js)
+    if (process.execPath && process.execPath.includes('node')) {
+      try {
+        // Check if it's actually node (not electron)
+        if (fs.existsSync(process.execPath) && !process.execPath.includes('electron')) {
+          return process.execPath;
+        }
+      } catch {
+        // Ignore errors
+      }
+    }
+
+    // Strategy 2: Check VS Code configuration for custom node path
+    const config = vscode.workspace.getConfiguration('deploymentBuddy');
+    const customNodePath = config.get<string>('nodePath');
+    if (customNodePath && fs.existsSync(customNodePath)) {
+      return customNodePath;
+    }
+
+    // Strategy 3: Try common system locations
+    const commonPaths = [
+      '/usr/local/bin/node',
+      '/opt/homebrew/bin/node',
+      '/usr/bin/node',
+    ];
+
+    for (const nodePath of commonPaths) {
+      try {
+        if (fs.existsSync(nodePath)) {
+          return nodePath;
+        }
+      } catch {
+        // Continue to next path
+      }
+    }
+
+    // Strategy 4: Try to find via shell command (if shell is available)
+    try {
+      // Try to find node in PATH using shell
+      const nodePath = execSync('which node', { 
+        encoding: 'utf8',
+        timeout: 1000,
+        env: { ...process.env, PATH: process.env.PATH || '' }
+      }).trim();
+      
+      if (nodePath && fs.existsSync(nodePath)) {
+        return nodePath;
+      }
+    } catch {
+      // Shell command failed, continue
+    }
+
+    // Strategy 5: Try nvm paths (common on macOS/Linux)
+    if (process.env.HOME) {
+      const nvmPath = path.join(process.env.HOME, '.nvm');
+      if (fs.existsSync(nvmPath)) {
+        try {
+          // Try to find latest node version in nvm
+          const versionsDir = path.join(nvmPath, 'versions', 'node');
+          if (fs.existsSync(versionsDir)) {
+            const versions = fs.readdirSync(versionsDir)
+              .filter(v => v.startsWith('v'))
+              .sort()
+              .reverse();
+            
+            for (const version of versions) {
+              const nodePath = path.join(versionsDir, version, 'bin', 'node');
+              if (fs.existsSync(nodePath)) {
+                return nodePath;
+              }
+            }
+          }
+        } catch {
+          // Ignore errors
+        }
+      }
+    }
+
+    // Fallback: return 'node' and let the error be more descriptive
+    return 'node';
+  }
+
+  /**
    * Start the MCP server and connect
    */
   async start(): Promise<void> {
@@ -66,14 +154,35 @@ export class McpManager {
       this.outputChannel.appendLine(`Server path: ${serverPath}`);
       this.outputChannel.appendLine(`Project path: ${projectPath}`);
 
+      // Find Node.js executable
+      const nodeExecutable = this.findNodeExecutable();
+      this.outputChannel.appendLine(`Node executable: ${nodeExecutable}`);
+
+      // Verify node executable exists (unless it's the fallback 'node')
+      if (nodeExecutable !== 'node' && !fs.existsSync(nodeExecutable)) {
+        throw new Error(
+          `Node.js executable not found at ${nodeExecutable}. ` +
+          `Please ensure Node.js is installed and accessible. ` +
+          `You can set the path manually in VS Code settings.`
+        );
+      }
+
       // Create transport with environment variables
       this.transport = new StdioClientTransport({
-        command: 'node',
+        command: nodeExecutable,
         args: [serverPath],
         env: {
           ...process.env,
           SF_PROJECT_PATH: projectPath,
-          SF_DEFAULT_ORG: defaultOrg
+          SF_DEFAULT_ORG: defaultOrg,
+          // Ensure PATH includes common node locations
+          PATH: process.env.PATH || [
+            '/usr/local/bin',
+            '/opt/homebrew/bin',
+            '/usr/bin',
+            process.env.HOME ? `${process.env.HOME}/.nvm/versions/node/*/bin` : null,
+            process.env.PATH
+          ].filter(Boolean).join(':')
         }
       });
 
@@ -174,7 +283,7 @@ export class McpManager {
         ? await Promise.race([toolPromise, timeoutPromise])
         : await toolPromise;
 
-      this.outputChannel.appendLine(`Result: ${JSON.stringify(result)}`);
+      this.outputChannel.appendLine(`Tool call completed. isError: ${result.isError}`);
 
       // Parse the result
       if (result.content && Array.isArray(result.content) && result.content.length > 0) {
@@ -182,30 +291,62 @@ export class McpManager {
         if (content.type === 'text') {
           try {
             const parsed = JSON.parse(content.text);
-            return {
+            const toolResult = {
               success: !result.isError,
               data: parsed,
-              error: result.isError ? parsed.message || content.text : undefined
+              error: result.isError ? (parsed.message || parsed.error || content.text) : undefined
             };
-          } catch {
-            return {
+            
+            if (result.isError) {
+              this.outputChannel.appendLine(`Tool returned error: ${toolResult.error}`);
+            }
+            
+            return toolResult;
+          } catch (parseError) {
+            // If JSON parsing fails, return the raw text
+            const toolResult = {
               success: !result.isError,
               data: content.text,
               error: result.isError ? content.text : undefined
             };
+            
+            if (result.isError) {
+              this.outputChannel.appendLine(`Tool returned error (non-JSON): ${content.text}`);
+            }
+            
+            return toolResult;
           }
         }
       }
 
-      return {
+      // If no content, check if there's an error
+      const toolResult = {
         success: !result.isError,
-        data: result
+        data: result,
+        error: result.isError ? 'Unknown error occurred' : undefined
       };
+      
+      if (result.isError) {
+        this.outputChannel.appendLine(`Tool returned error (no content): ${JSON.stringify(result)}`);
+      }
+      
+      return toolResult;
     } catch (error: any) {
-      this.outputChannel.appendLine(`Tool error: ${error.message}`);
+      const errorMessage = error.message || 'Unknown error occurred';
+      this.outputChannel.appendLine(`Tool error: ${errorMessage}`);
+      this.outputChannel.appendLine(`Error stack: ${error.stack || 'No stack trace'}`);
+      
+      // Check if it's a timeout error
+      if (errorMessage.includes('timeout') || errorMessage.includes('timed out')) {
+        return {
+          success: false,
+          error: `Operation timed out. ${errorMessage}. For large plans, consider using validate_batch tool instead.`
+        };
+      }
+      
       return {
         success: false,
-        error: error.message
+        error: errorMessage
       };
     }
   }

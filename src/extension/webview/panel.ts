@@ -220,19 +220,45 @@ export class DeploymentBuddyPanel {
         break;
 
       case 'validatePlan':
-        this._panel.webview.postMessage({
-          command: 'validationStarted'
-        });
-        
-        const validateResult = await this._mcpManager.callTool('validate_plan', {
-          plan: message.plan
-        });
-        
-        this._panel.webview.postMessage({
-          command: 'validationResult',
-          data: validateResult.data,
-          error: validateResult.error
-        });
+        try {
+          this._panel.webview.postMessage({
+            command: 'validationStarted'
+          });
+          
+          // Validate plan structure
+          if (!message.plan) {
+            throw new Error('No plan provided. Please build a plan first.');
+          }
+          
+          if (!message.plan.batches || !Array.isArray(message.plan.batches)) {
+            throw new Error('Invalid plan structure. Please rebuild the plan.');
+          }
+          
+          this._mcpManager.getOutputChannel().appendLine(`Validating plan with ${message.plan.batches.length} batches...`);
+          
+          const validateResult = await this._mcpManager.callTool('validate_plan', {
+            plan: message.plan
+          });
+          
+          this._mcpManager.getOutputChannel().appendLine(`Validation result: ${validateResult.success ? 'Success' : 'Failed'}`);
+          if (validateResult.error) {
+            this._mcpManager.getOutputChannel().appendLine(`Error: ${validateResult.error}`);
+          }
+          
+          this._panel.webview.postMessage({
+            command: 'validationResult',
+            data: validateResult.data,
+            error: validateResult.error
+          });
+        } catch (error: any) {
+          const errorMessage = error.message || 'Unknown error occurred during validation';
+          this._mcpManager.getOutputChannel().appendLine(`Validation error: ${errorMessage}`);
+          this._panel.webview.postMessage({
+            command: 'validationResult',
+            data: null,
+            error: errorMessage
+          });
+        }
         break;
 
       case 'analyzeCliOutput':
@@ -1122,7 +1148,17 @@ export class DeploymentBuddyPanel {
                     if (message.data) {
                         renderValidationResult(message.data);
                     } else if (message.error) {
-                        log('Validation error: ' + message.error, 'error');
+                        log('❌ Validation error: ' + message.error, 'error');
+                        // Show error in a more visible way
+                        const errorDiv = document.createElement('div');
+                        errorDiv.style.cssText = 'padding: 15px; margin: 10px 0; background: var(--vscode-inputValidation-errorBackground); border-left: 3px solid var(--vscode-errorForeground); border-radius: 4px;';
+                        errorDiv.innerHTML = '<strong>Validation Failed</strong><br>' + message.error;
+                        const planPanel = document.getElementById('deployPlanPanel');
+                        if (planPanel) {
+                            planPanel.insertBefore(errorDiv, planPanel.firstChild);
+                        }
+                    } else {
+                        log('Validation completed but no result data received', 'warning');
                     }
                     break;
                 
@@ -1815,6 +1851,17 @@ export class DeploymentBuddyPanel {
             const plan = data.plan;
             const summary = data.summary;
             
+            // Store the plan for validation/deployment
+            currentPlan = plan;
+            
+            // Log plan details for debugging
+            console.log('Plan stored:', {
+                batches: plan.batches?.length || 0,
+                totalItems: plan.totalItems || 0,
+                hasBatches: !!plan.batches,
+                batchTypes: plan.batches?.map(b => b.metadataType) || []
+            });
+            
             let html = '<div style="margin-bottom: 15px;">';
             html += '<strong>Plan Summary:</strong> ' + summary.totalItems + ' items in ' + summary.totalBatches + ' batches';
             if (data.validation && !data.validation.valid) {
@@ -1857,6 +1904,12 @@ export class DeploymentBuddyPanel {
                 return;
             }
             
+            // Validate plan structure
+            if (!currentPlan.batches || !Array.isArray(currentPlan.batches) || currentPlan.batches.length === 0) {
+                log('Invalid plan structure. Please rebuild the plan.', 'error');
+                return;
+            }
+            
             const selectedOrg = document.getElementById('orgSelect').value;
             if (!selectedOrg) {
                 log('Please select a target org before validating', 'error');
@@ -1864,13 +1917,27 @@ export class DeploymentBuddyPanel {
             }
             
             log('Starting batch-by-batch validation against: ' + selectedOrg, 'info');
-            document.getElementById('validateBtn').disabled = true;
-            document.getElementById('validateBtn').textContent = 'Validating...';
+            log('Plan has ' + currentPlan.batches.length + ' batches with ' + (currentPlan.totalItems || 0) + ' total items', 'info');
             
-            vscode.postMessage({
-                command: 'validatePlan',
-                plan: currentPlan
-            });
+            const validateBtn = document.getElementById('validateBtn');
+            validateBtn.disabled = true;
+            validateBtn.textContent = 'Validating...';
+            
+            // Clear any previous error messages
+            const planPanel = document.getElementById('deployPlanPanel');
+            const existingErrors = planPanel.querySelectorAll('[style*="errorBackground"]');
+            existingErrors.forEach(el => el.remove());
+            
+            try {
+                vscode.postMessage({
+                    command: 'validatePlan',
+                    plan: currentPlan
+                });
+            } catch (error) {
+                log('Error sending validation request: ' + error.message, 'error');
+                validateBtn.disabled = false;
+                validateBtn.textContent = 'Validate';
+            }
         }
         
         function deployPlan() {
